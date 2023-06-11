@@ -3,27 +3,33 @@ use std::io::Write;
 use std::io::ErrorKind;
 use serde::{Serialize, Deserialize};
 
-fn int_default() -> i32 {
-    return -1
+fn int_default() -> u32 {
+    return 0
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LogEntry {
+    pub content: String,
+    pub term: u32,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct State {
-    pub current_term: i32,
-    pub voted_for: i32,
-    pub log: Vec<String>,
+    pub current_term: u32,
+    pub voted_for: u32,
+    pub logs: Vec<LogEntry>,
 
     // common volatile state
     #[serde(skip_serializing, default="int_default")]
-    pub commit_index: i32,
+    pub commit_index: u32,
     #[serde(skip_serializing, default="int_default")]
-    pub last_applied: i32,
+    pub last_applied: u32,
 
     // volatile state for leaders
     #[serde(skip_serializing, default="Vec::new")]
-    pub next_index: Vec<i32>,
+    pub next_index: Vec<u32>,
     #[serde(skip_serializing, default="Vec::new")]
-    pub match_index: Vec<i32>,
+    pub match_index: Vec<u32>,
 }
 
 impl State {
@@ -40,11 +46,11 @@ impl State {
             Err(error) => match error.kind() {
                 ErrorKind::NotFound => {
                     let state = State {
-                        current_term: -1,
-                        voted_for: -1,
-                        log: Vec::new(),
-                        commit_index: -1,
-                        last_applied: -1,
+                        current_term: 0,
+                        voted_for: 0,
+                        logs: Vec::new(),
+                        commit_index: 0,
+                        last_applied: 0,
                         next_index: Vec::new(),
                         match_index: Vec::new(),
                     };

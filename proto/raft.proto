@@ -9,9 +9,15 @@ service RaftParticipant {
 }
 
 message AppendEntriesRequest {
-  string name = 1;
+  uint32 term = 1;
+  uint32 leader_id = 2;
+  uint32 prev_log_index = 3;
+  uint32 prev_log_term = 4;
+  repeated string entries = 5;
+  uint32 leader_commit = 6;
 }
 
 message AppendEntriesResponse {
-  string message = 1;
+  uint32 term = 1;
+  bool success = 2;
 }
