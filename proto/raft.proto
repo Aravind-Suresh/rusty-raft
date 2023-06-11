@@ -1,0 +1,17 @@
+// version of protocol buffer used
+syntax = "proto3";
+
+// package name for the buffer will be used later
+package raft;
+
+service RaftParticipant {
+  rpc AppendEntries (AppendEntriesRequest) returns (AppendEntriesResponse);
+}
+
+message AppendEntriesRequest {
+  string name = 1;
+}
+
+message AppendEntriesResponse {
+  string message = 1;
+}
