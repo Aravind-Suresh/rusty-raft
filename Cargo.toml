@@ -16,6 +16,7 @@ grpc-protobuf="*"
 prost = "0.10.4"
 tokio = { version = "1.19.2", features = ["macros", "rt-multi-thread"] }
 tonic = "0.7.2"
+rand = "0.8.4"
 
 [build-dependencies]
 protoc-rust-grpc = "0.8.2"

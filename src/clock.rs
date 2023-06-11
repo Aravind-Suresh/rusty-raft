@@ -4,8 +4,8 @@ use std::marker::{Send, Sync};
 pub trait Clock: Send + Sync {
     fn now(&self) -> u128;
     fn since(&self, ts: u128) -> u128 {
-        now = self.now()
-        return ts - now
+        let now = self.now();
+        return now - ts;
     }
 }
 
