@@ -26,6 +26,7 @@ fn mode_default() -> Mode {
 
 #[derive(Serialize, Deserialize)]
 pub struct State {
+    pub id: u32,
     pub current_term: u32,
     pub voted_for: u32,
     pub logs: Vec<LogEntry>,
@@ -54,13 +55,14 @@ impl State {
         out.write(serialized.as_bytes()).unwrap();
         serialized
     }
-    pub fn restore() -> Self {
+    pub fn restore(id: u32) -> Self {
         let res = read_to_string("state/persisted.bin");
         let inp = match res {
             Ok(inp) => inp,
             Err(error) => match error.kind() {
                 ErrorKind::NotFound => {
                     let state = State {
+                        id: id,
                         current_term: 0,
                         voted_for: 0,
                         logs: Vec::new(),

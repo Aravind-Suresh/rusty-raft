@@ -1,5 +1,6 @@
 mod state;
 mod clock;
+mod config;
 
 use state::{State, LogEntry};
 use tonic::{transport::Server, Request, Response, Status};
@@ -8,8 +9,11 @@ use std::sync::{RwLock, Arc};
 use clock::Clock;
 use std::{cmp, thread, time};
 use std::mem;
+use config::{Config, Node};
+use std::collections::HashMap;
 
 const MAIN_LOOP_DELAY: time::Duration = time::Duration::from_secs(10);
+const ELECTION_TIMEOUT: time::Duration = time::Duration::from_millis(200);
 
 mod raft {
     tonic::include_proto!("raft");
@@ -98,8 +102,25 @@ impl<C: Clock + 'static> RaftParticipant for RaftParticipantImpl<C> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let clock = clock::SystemClock{};
+    // TODO: move this to a config file and read it
+    // TODO: add config validation checks
+    let cfg = Config{
+        nodes: [
+            Node{
+                id: 1,
+                addr: "[::1]:50051",
+            },
+            Node {
+                id: 2,
+                addr: "[::1]:50052",
+            }
+        ]
+    }
+    let mut clients: HashMap<u32, &RaftParticipantClient> = HashMap::new();
+    // TODO: this should be read from sys args
+    let id = 1;
     let raft = RaftParticipantImpl{
-        state: RwLock::new(State::restore()),
+        state: RwLock::new(State::restore(id)),
         clock: clock,
     };
 
@@ -111,6 +132,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         println!("new run of main loop, started at = {}", clock.now());
+        // TODO: do optimistic locking here
+        let state = raft.state.write().unwrap()
+        match state.mode {
+            State::Follower => {
+                if clock.since(state.last_heartbeat_at_millis) >= ELECTION_TIMEOUT {
+                    state.mode = Mode::Candidate
+                }
+            },
+            State::Candidate => {
+                // conduct an election here
+                state.current_term += 1
+                state.voted_for = state.id
+                state.last_heartbeat_at_millis = clock.now()
+                let mut votes = 0
+                for node in cfg.nodes {
+                    if node.id == id {
+                        continue
+                    }
+                    clients.entry(node.id).or_insert_with(|| &RaftParticipantClient::connect(node.addr).await?);
+                    let client = clients.get(node.id);
+                    let request = Request::new(
+                        RequestVoteRequest{
+                            term: state.current_term,
+                            candidate_id: id,
+                            last_log_index: state.logs.len(),
+                            last_log_term: state.logs.top().unwrap_or_else(0)
+                        }
+                    );
+                    votes += match client.request_vote(request).await() {
+                        Some(response) => {
+                            if response.vote_granted {
+                                return 1
+                            }
+                            return 0
+                        },
+                        _ => {
+                            return 0
+                        }
+                    }
+                    if votes > cfg.majority_vote_count() {
+                        // we got the majority of votes, so we are the leader
+                        state.mode = Mode::Leader
+                    } else {
+                        // if we did not get enough votes
+                        // then either it is a split votes scenario
+                        // or some other node has become the leader by now
+                        // in either case it makes sense to become a follower
+                        // for the split votes scenario, on election timeout
+                        // this node will retry again
+                        state.mode = Mode::Follower
+                    }
+                }
+            },
+        }
+        // releases the lock
+        mem::drop(state)
         thread::sleep(MAIN_LOOP_DELAY)
     }
 
