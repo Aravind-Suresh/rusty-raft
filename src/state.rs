@@ -14,6 +14,17 @@ pub struct LogEntry {
 }
 
 #[derive(Serialize, Deserialize)]
+pub enum Mode {
+    Leader,
+    Follower,
+    Candidate,
+}
+
+fn mode_default() -> Mode {
+    Mode::Candidate
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct State {
     pub current_term: u32,
     pub voted_for: u32,
@@ -24,6 +35,10 @@ pub struct State {
     pub commit_index: u32,
     #[serde(skip_serializing, default="int_default")]
     pub last_applied: u32,
+    #[serde(skip_serializing, default="mode_default")]
+    pub mode: Mode,
+    #[serde(skip_serializing, default)]
+    pub last_heartbeat_at_millis: u128,
 
     // volatile state for leaders
     #[serde(skip_serializing, default="Vec::new")]
@@ -51,6 +66,8 @@ impl State {
                         logs: Vec::new(),
                         commit_index: 0,
                         last_applied: 0,
+                        mode: Mode::Follower,
+                        last_heartbeat_at_millis: 0,
                         next_index: Vec::new(),
                         match_index: Vec::new(),
                     };

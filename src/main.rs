@@ -1,20 +1,27 @@
 mod state;
+mod clock;
+
 use state::{State, LogEntry};
 use tonic::{transport::Server, Request, Response, Status};
 use raft::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse, raft_participant_server::{RaftParticipant, RaftParticipantServer}};
-use std::sync::RwLock;
-use std::cmp;
+use std::sync::{RwLock, Arc};
+use clock::Clock;
+use std::{cmp, thread, time};
+use std::mem;
+
+const MAIN_LOOP_DELAY: time::Duration = time::Duration::from_secs(10);
 
 mod raft {
     tonic::include_proto!("raft");
 }
 
-pub struct RaftParticipantImpl {
+pub struct RaftParticipantImpl<C: Clock> {
     state: RwLock<State>,
+    clock: C,
 }
 
 #[tonic::async_trait]
-impl RaftParticipant for RaftParticipantImpl {
+impl<C: Clock + 'static> RaftParticipant for RaftParticipantImpl<C> {
     async fn append_entries(
         &self, 
         request: Request<AppendEntriesRequest>
@@ -48,6 +55,7 @@ impl RaftParticipant for RaftParticipantImpl {
         if request.leader_commit > state.commit_index {
             state.commit_index = cmp::min(request.leader_commit, state.logs.len() as u32)
         }
+        state.last_heartbeat_at_millis = self.clock.now();
         // flushing state to disk before returning the response
         state.persist();
         Ok(Response::new(AppendEntriesResponse{
@@ -89,15 +97,23 @@ impl RaftParticipant for RaftParticipantImpl {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let clock = clock::SystemClock{};
     let raft = RaftParticipantImpl{
         state: RwLock::new(State::restore()),
+        clock: clock,
     };
 
     let addr = "[::1]:50051".parse().unwrap();
     println!("Server listening on {}", addr);
-    Server::builder()
+    let _server = Server::builder()
         .add_service(RaftParticipantServer::new(raft))
-        .serve(addr)
-        .await?;
-    Ok(())
+        .serve(addr);
+
+    loop {
+        println!("new run of main loop, started at = {}", clock.now());
+        thread::sleep(MAIN_LOOP_DELAY)
+    }
+
+    // server.await?;
+    // Ok(())
 }
