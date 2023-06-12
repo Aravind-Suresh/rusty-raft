@@ -16,8 +16,9 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::env;
 use rand::prelude::*;
 
-const MAIN_LOOP_DELAY: time::Duration = time::Duration::from_secs(5);
-const ELECTION_TIMEOUT: time::Duration = time::Duration::from_millis(200);
+const MAIN_LOOP_DELAY: time::Duration = time::Duration::from_secs(1);
+const ELECTION_TIMEOUT: time::Duration = time::Duration::from_secs(10);
+const HEARTBEAT_TIMEOUT: time::Duration = time::Duration::from_secs(1);
 
 mod raft {
     tonic::include_proto!("raft");
@@ -64,6 +65,7 @@ impl<C: Clock + 'static> RaftParticipant for RaftParticipantImpl<C> {
             state.commit_index = cmp::min(request.leader_commit, state.logs.len() as u32)
         }
         state.last_heartbeat_recv_millis = self.clock.now();
+        println!("node:{}.last_heartbeat_recv_millis = {}, from = {}", state.id, state.last_heartbeat_recv_millis, request.leader_id);
         // flushing state to disk before returning the response
         state.persist();
         Ok(Response::new(AppendEntriesResponse{
@@ -104,10 +106,11 @@ impl<C: Clock + 'static> RaftParticipant for RaftParticipantImpl<C> {
     }
 }
 
-fn jittered_sleep(dur: Duration) {
-    let max_jitter: u64 = ((dur.as_millis() as f64) * 0.5) as u64;
+fn jittered_sleep(dur: Duration, id: u32) {
+    let min_jitter: u64 = ((dur.as_millis() as f64) * 1.0 * (id as f64)) as u64;
+    let max_jitter: u64 = ((dur.as_millis() as f64) * 2.0 * (id as f64)) as u64;
     let mut jitter: u64 = random();
-    jitter = jitter % max_jitter;
+    jitter = min_jitter + jitter % (max_jitter - min_jitter);
     println!("jittered sleep, base: {}, jitter: {}", dur.as_millis(), jitter);
     thread::sleep(dur + Duration::from_millis(jitter));
 }
@@ -164,7 +167,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // TODO: remove wait and add handshake with every node
-    jittered_sleep(time::Duration::from_secs(3));
+    jittered_sleep(time::Duration::from_secs(3), id);
+
+    println!("creating connections with all nodes");
+
+    for node in &cfg.nodes {
+        if node.id == id {
+            continue;
+        }
+        match clients.entry(node.id) {
+            Entry::Occupied(o) => o.into_mut(),
+            Entry::Vacant(v) => {
+                let client_addr = "http://".to_string() + &node.addr.to_string();
+                println!("[node:{}] trying to connect to node:{}, {}", id, node.id, client_addr);
+                let c = RaftParticipantClient::connect(client_addr).await.unwrap();
+                v.insert(c)
+            }
+        };
+    }
 
     loop {
         // TODO: do optimistic locking here
@@ -188,15 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if node.id == id {
                         continue
                     }
-                    let client = match clients.entry(node.id) {
-                        Entry::Occupied(o) => o.into_mut(),
-                        Entry::Vacant(v) => {
-                            let client_addr = "http://".to_string() + &node.addr.to_string();
-                            println!("trying to connect to {}", client_addr);
-                            let c = RaftParticipantClient::connect(client_addr).await.unwrap();
-                            v.insert(c)
-                        }
-                    };
+                    let client = clients.get_mut(&node.id).unwrap();
                     let mut request = Request::new(
                         RequestVoteRequest{
                             term: state.current_term,
@@ -216,7 +228,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                         Err(_) => {}
                     };
-                    if votes > cfg.majority_vote_count() {
+                    if votes >= cfg.majority_vote_count() {
                         // we got the majority of votes, so we are the leader
                         state.mode = Mode::Leader;
                         // clearing volatile state on election (could be some old entries on a re-election)
@@ -236,12 +248,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             },
             Mode::Leader => {
+                if clock.since(state.last_heartbeat_sent_millis) >= HEARTBEAT_TIMEOUT.as_millis() {
+                    for node in &cfg.nodes {
+                        let mut request = Request::new(
+                            AppendEntriesRequest{
+                                term: state.current_term,
+                                leader_id: id,
+                                prev_log_index: state.logs.len() as u32,
+                                prev_log_term: state.logs.last().map(|l| l.term).unwrap_or_else(|| 0),
+                                leader_commit: state.commit_index,
+                                entries: Vec::new(),
+                            }
+                        );
+                        request.metadata_mut().insert("grpc-timeout", "1000m".parse().unwrap());
 
+                        if node.id == id {
+                            continue;
+                        }
+                        let client = clients.get_mut(&node.id).unwrap();
+                        _ = client.append_entries(request).await?.into_inner();
+                    }
+                    state.last_heartbeat_sent_millis = clock.now();
+                }
             }
         }
         // releases the lock
         mem::drop(state);
-        jittered_sleep(MAIN_LOOP_DELAY);
+        thread::sleep(MAIN_LOOP_DELAY);
     }
 
     // server.await?;
