@@ -3,6 +3,7 @@ use std::io::Write;
 use std::io::ErrorKind;
 use serde::{Serialize, Deserialize};
 use std::fmt; 
+use crate::config::{Config};
 
 fn int_default() -> u32 {
     return 0
@@ -58,7 +59,7 @@ impl State {
         out.write(serialized.as_bytes()).unwrap();
         serialized
     }
-    pub fn restore(id: u32) -> Self {
+    pub fn restore(id: u32, cfg: &Config) -> Self {
         let res = read_to_string(format!("state/{}.bin", id));
         let inp = match res {
             Ok(inp) => inp,
@@ -73,8 +74,8 @@ impl State {
                         last_applied: 0,
                         mode: Mode::Follower,
                         last_heartbeat_recv_millis: 0,
-                        next_index: Vec::new(),
-                        match_index: Vec::new(),
+                        next_index: vec![1; cfg.nodes.len()],
+                        match_index: vec![0; cfg.nodes.len()],
                         last_heartbeat_sent_millis: 0,
                     };
                     state.persist()
@@ -84,6 +85,21 @@ impl State {
         };
         let deserialized = serde_json::from_str::<Self>(&inp).unwrap();
         return deserialized;
+    }
+    pub fn reset_leader_state(&mut self) {
+        for i in &mut self.next_index {
+            *i = 0;
+        }
+        for i in &mut self.match_index {
+            *i = 0;
+        }
+    }
+    pub fn derive_commit_index(&self, cfg: &Config) -> u32 {
+        let majority = cfg.majority_vote_count();
+        let mut vec = self.next_index.clone();
+        vec.sort();
+        vec.reverse();
+        return vec[(majority - 1) as usize];
     }
 }
 

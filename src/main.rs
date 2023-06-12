@@ -141,7 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = env::args().collect();
     let id: u32 = args[1].parse().unwrap();
-    let state = Arc::new(RwLock::new(State::restore(id)));
+    let state = Arc::new(RwLock::new(State::restore(id, &cfg)));
     let raft = RaftParticipantImpl{
         state: Arc::clone(&state),
         clock: clock,
@@ -232,8 +232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // we got the majority of votes, so we are the leader
                         state.mode = Mode::Leader;
                         // clearing volatile state on election (could be some old entries on a re-election)
-                        state.next_index.clear();
-                        state.match_index.clear();
+                        state.reset_leader_state();
                     } else {
                         // if we did not get enough votes
                         // then either it is a split votes scenario
@@ -269,6 +268,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ = client.append_entries(request).await?.into_inner();
                     }
                     state.last_heartbeat_sent_millis = clock.now();
+                }
+
+                let mut ctr = 0;
+                let vec = state.next_index.clone();
+                for nni in &vec {
+                    ctr += 1;
+                    if ctr == id {
+                        continue;
+                    }
+                    let len = state.logs.len() as u32;
+                    if len >= *nni {
+                        let num = len - *nni + 1;
+                        let mut entries = vec![String::from(""); num as usize];
+                        for i in 0..num {
+                            let j = (*nni - 1 + i) as usize;
+                            entries[i as usize] = state.logs[j].content.to_string();
+                        }
+                        let mut request = Request::new(
+                            AppendEntriesRequest{
+                                term: state.current_term,
+                                leader_id: id,
+                                prev_log_index: state.logs.len() as u32,
+                                prev_log_term: state.logs.last().map(|l| l.term).unwrap_or_else(|| 0),
+                                leader_commit: state.commit_index,
+                                entries: entries,
+                            }
+                        );
+                        request.metadata_mut().insert("grpc-timeout", "1000m".parse().unwrap());
+                        let client = clients.get_mut(&(ctr - 1)).unwrap();
+                        let response = client.append_entries(request).await?.into_inner();
+                        let idx = (ctr-1) as usize;
+                        if response.success {
+                            state.next_index[idx] = len + 1;
+                            state.match_index[idx] = len;
+                        } else {
+                            // retry to send this in the next iteration
+                            // this could arise because of log inconsistency
+                            state.next_index[idx] -= 1;
+                        }
+                    }
+                }
+
+                let new_commit_index = state.derive_commit_index(&cfg);
+                if new_commit_index > state.commit_index {
+                    state.commit_index = new_commit_index;
                 }
             }
         }
