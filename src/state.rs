@@ -99,7 +99,11 @@ impl State {
         let mut vec = self.next_index.clone();
         vec.sort();
         vec.reverse();
-        return vec[(majority - 1) as usize];
+        let idx = (majority - 1) as usize;
+        if idx >= vec.len() {
+            return 0;
+        }
+        return vec[idx];
     }
 }
 

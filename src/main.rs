@@ -316,6 +316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        state.persist();
         // releases the lock
         mem::drop(state);
         thread::sleep(MAIN_LOOP_DELAY);
