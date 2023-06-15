@@ -1,5 +1,5 @@
 # rusty-raft
-A Rust implementation of the [Raft](https://raft.github.io/raft.pdf) algorithm
+A Rust implementation of the [Raft](https://raft.github.io/raft.pdf) algorithm that uses gRPC protocols to talk to each other. It also exposes a gRPC client for users to talk to the Raft quorum.
 
 ## Run
 Dependencies and builds are handled using Cargo.
