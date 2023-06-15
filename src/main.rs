@@ -5,6 +5,7 @@ mod config;
 use state::{State, Mode, LogEntry};
 use tonic::{transport::Server, transport::Channel, Request, Response, Status};
 use raft::{AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
+use raft::{LogRequest, LogResponse, LogStatus};
 use raft::raft_participant_server::{RaftParticipant, RaftParticipantServer};
 use raft::raft_participant_client::{RaftParticipantClient};
 use std::sync::{Arc, RwLock};
@@ -26,6 +27,7 @@ mod raft {
 
 pub struct RaftParticipantImpl<C: Clock> {
     state: Arc<RwLock<State>>,
+    cfg: Arc<Config>,
     clock: C,
 }
 
@@ -45,7 +47,19 @@ impl<C: Clock + 'static> RaftParticipant for RaftParticipantImpl<C> {
         if request.term < state.current_term {
             return response_false
         }
-        if state.logs.len() > 0 && state.logs.get(request.prev_log_index as usize).unwrap().term != request.prev_log_term {
+        // this is a heartbeat request from the leader
+        // so other parameters are ignored
+        if request.entries.len() == 0 {
+            // updating leader id for redirecting purposes
+            state.leader_id = request.leader_id;
+            state.last_heartbeat_recv_millis = self.clock.now();
+            state.persist();
+            return Ok(Response::new(AppendEntriesResponse{
+                term: state.current_term,
+                success: true,
+            }))
+        }
+        if state.logs.len() > ((request.prev_log_index + 1) as usize) && state.logs.get(request.prev_log_index as usize).unwrap().term != request.prev_log_term {
             return response_false
         }
         // removing entries that are conflicting with the incoming entries
@@ -61,6 +75,8 @@ impl<C: Clock + 'static> RaftParticipant for RaftParticipantImpl<C> {
                 term: current_term
             })
         }
+        // updating leader id for redirecting purposes
+        state.leader_id = request.leader_id;
         if request.leader_commit > state.commit_index {
             state.commit_index = cmp::min(request.leader_commit, state.logs.len() as u32)
         }
@@ -104,6 +120,43 @@ impl<C: Clock + 'static> RaftParticipant for RaftParticipantImpl<C> {
         }
         response_false
     }
+
+    async fn log(
+        &self,
+        request: Request<LogRequest>,
+    ) -> Result<Response<LogResponse>, Status> {
+        let request = request.get_ref();
+        let mut state = self.state.write().unwrap();
+        if state.mode != Mode::Leader {
+            // note that this redirect url could be incorrect
+            // during network partitions
+            // so the client can best be implemented as:
+            // 1. sample a random node and send request
+            // 2. if it gets a redirect url in the response, send the request here
+            // 3. if it still gets a redirect url, go back to step-1
+            // eventually the above pings would succeed
+            let mut redirect_url = String::from("");
+            if state.leader_id > 0{
+                // TODO: unify duplicated logic
+                redirect_url = "http://".to_owned() + &self.cfg.nodes[(state.leader_id - 1) as usize].addr.to_string();
+            }
+            return Ok(Response::new(LogResponse{
+                status: LogStatus::Redirect.into(),
+                error: "".to_string(),
+                redirect_url: redirect_url,
+            }));
+        }
+        let current_term = state.current_term;
+        for entry in &request.entries {
+            let content = entry.to_string();
+            state.logs.push(LogEntry{content: content, term: current_term});
+        }
+        return Ok(Response::new(LogResponse{
+            status: LogStatus::Acknowledged.into(),
+            error: "".to_string(),
+            redirect_url: "".to_string(),
+        }));
+    }
 }
 
 fn jittered_sleep(dur: Duration, id: u32) {
@@ -120,7 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let clock = clock::SystemClock{};
     // TODO: move this to a config file and read it
     // TODO: add config validation checks
-    let cfg = Config{
+    let cfg = Arc::new(Config{
         nodes: [
             Node{
                 id: 1,
@@ -135,7 +188,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 addr: "[::1]:50053".to_string(),
             }
         ].to_vec()
-    };
+    });
     // TODO: this entire main function can be moved to a raft.step method
     let mut clients: HashMap<u32, RaftParticipantClient<Channel>> = HashMap::new();
 
@@ -144,6 +197,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(RwLock::new(State::restore(id, &cfg)));
     let raft = RaftParticipantImpl{
         state: Arc::clone(&state),
+        cfg: Arc::clone(&cfg),
         clock: clock,
     };
 
@@ -185,6 +239,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
     }
+
+    println!("{}, created {} connections", id, clients.len());
 
     loop {
         // TODO: do optimistic locking here
@@ -231,6 +287,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if votes >= cfg.majority_vote_count() {
                         // we got the majority of votes, so we are the leader
                         state.mode = Mode::Leader;
+                        state.leader_id = id;
                         // clearing volatile state on election (could be some old entries on a re-election)
                         state.reset_leader_state();
                     } else {
@@ -253,8 +310,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             AppendEntriesRequest{
                                 term: state.current_term,
                                 leader_id: id,
-                                prev_log_index: state.logs.len() as u32,
-                                prev_log_term: state.logs.last().map(|l| l.term).unwrap_or_else(|| 0),
+                                // these can be zero as the entries' size is zero
+                                // and the heartbeat requests are handled separately
+                                prev_log_index: 0,
+                                prev_log_term: 0,
                                 leader_commit: state.commit_index,
                                 entries: Vec::new(),
                             }
@@ -272,6 +331,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let mut ctr = 0;
                 let vec = state.next_index.clone();
+                println!("next index: {:?}, logs len: {}", vec, state.logs.len());
                 for nni in &vec {
                     ctr += 1;
                     if ctr == id {
@@ -285,20 +345,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let j = (*nni - 1 + i) as usize;
                             entries[i as usize] = state.logs[j].content.to_string();
                         }
+                        let pli = *nni - 1;
                         let mut request = Request::new(
                             AppendEntriesRequest{
                                 term: state.current_term,
                                 leader_id: id,
-                                prev_log_index: state.logs.len() as u32,
-                                prev_log_term: state.logs.last().map(|l| l.term).unwrap_or_else(|| 0),
+                                prev_log_index: pli,
+                                prev_log_term: state.logs[pli as usize].term,
                                 leader_commit: state.commit_index,
                                 entries: entries,
                             }
                         );
                         request.metadata_mut().insert("grpc-timeout", "1000m".parse().unwrap());
-                        let client = clients.get_mut(&(ctr - 1)).unwrap();
+                        let client = clients.get_mut(&ctr).unwrap();
                         let response = client.append_entries(request).await?.into_inner();
-                        let idx = (ctr-1) as usize;
+                        let idx = (ctr - 1) as usize;
                         if response.success {
                             state.next_index[idx] = len + 1;
                             state.match_index[idx] = len;

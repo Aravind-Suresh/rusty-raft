@@ -15,7 +15,7 @@ pub struct LogEntry {
     pub term: u32,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Mode {
     Leader,
     Follower,
@@ -42,6 +42,8 @@ pub struct State {
     pub mode: Mode,
     #[serde(skip_serializing, default)]
     pub last_heartbeat_recv_millis: u128,
+    #[serde(skip_serializing, default)]
+    pub leader_id: u32,
 
     // volatile state for leaders
     #[serde(skip_serializing, default="Vec::new")]
@@ -53,42 +55,36 @@ pub struct State {
 }
 
 impl State {
-    pub fn persist(self: &Self) -> String {
+    pub fn persist(self: &Self) {
         let mut out = File::create(format!("state/{}.bin", self.id)).unwrap();
         let serialized = serde_json::to_string(self).unwrap();
         out.write(serialized.as_bytes()).unwrap();
-        serialized
     }
     pub fn restore(id: u32, cfg: &Config) -> Self {
         let res = read_to_string(format!("state/{}.bin", id));
         let inp = match res {
             Ok(inp) => inp,
             Err(error) => match error.kind() {
-                ErrorKind::NotFound => {
-                    let state = State {
-                        id: id,
-                        current_term: 0,
-                        voted_for: 0,
-                        logs: Vec::new(),
-                        commit_index: 0,
-                        last_applied: 0,
-                        mode: Mode::Follower,
-                        last_heartbeat_recv_millis: 0,
-                        next_index: vec![1; cfg.nodes.len()],
-                        match_index: vec![0; cfg.nodes.len()],
-                        last_heartbeat_sent_millis: 0,
-                    };
-                    state.persist()
-                },
+                ErrorKind::NotFound => "{\"id\":".to_owned() + &id.to_string() + 
+                    ",\"current_term\":0,\"voted_for\":0,\"logs\":[]}",
                 other_error => panic!("unexpected error: {:?}", other_error),
             }
         };
-        let deserialized = serde_json::from_str::<Self>(&inp).unwrap();
-        return deserialized;
+        let mut state = serde_json::from_str::<Self>(&inp).unwrap();
+        state.commit_index = 0;
+        state.last_applied = 0;
+        state.mode = Mode::Follower;
+        state.last_heartbeat_recv_millis = 0;
+        state.leader_id = 0;
+        state.next_index = vec![1; cfg.nodes.len()];
+        state.match_index = vec![0; cfg.nodes.len()];
+        state.last_heartbeat_sent_millis = 0;
+        state.persist();
+        return state;
     }
     pub fn reset_leader_state(&mut self) {
         for i in &mut self.next_index {
-            *i = 0;
+            *i = 1;
         }
         for i in &mut self.match_index {
             *i = 0;
